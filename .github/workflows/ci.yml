@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.compiler }}, ${{ matrix.precision }}, ${{ matrix.build }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, compiler: gcc, precision: float, build: Debug }
+          - { os: ubuntu-latest, compiler: gcc, precision: double, build: Release }
+          - { os: ubuntu-latest, compiler: clang, precision: float, build: Release }
+          - { os: ubuntu-latest, compiler: clang, precision: double, build: Debug }
+          - { os: macos-latest, compiler: clang, precision: float, build: Release }
+          - { os: macos-latest, compiler: clang, precision: double, build: Debug }
+          - { os: windows-latest, compiler: msvc, precision: float, build: Debug }
+          - { os: windows-latest, compiler: msvc, precision: double, build: Release }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = ubuntu-latest ]; then export CC=${{ matrix.compiler }}; fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build }} -DTINYCTRL_WARNINGS_AS_ERRORS=ON \
+            -DTINYCTRL_USE_DOUBLE=${{ matrix.precision == 'double' && 'ON' || 'OFF' }}
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build }}
+      - name: Test
+        working-directory: build
+        run: ctest -C ${{ matrix.build }} --output-on-failure
+
+  sanitizers:
+    name: sanitizers (${{ matrix.precision }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        precision: [float, double]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with AddressSanitizer and UndefinedBehaviorSanitizer
+        run: |
+          CC=clang cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DTINYCTRL_SANITIZE=ON -DTINYCTRL_WARNINGS_AS_ERRORS=ON \
+            -DTINYCTRL_USE_DOUBLE=${{ matrix.precision == 'double' && 'ON' || 'OFF' }}
+          cmake --build build
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+      - name: Run the example
+        run: ./build/examples/motor_speed > /dev/null
+
+  embedded:
+    name: embedded (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: cortex-m4f
+            packages: gcc-arm-none-eabi libnewlib-arm-none-eabi
+            cc: arm-none-eabi-gcc
+            size: arm-none-eabi-size
+            nm: arm-none-eabi-nm
+            flags: -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
+            link: --specs=nano.specs --specs=nosys.specs
+          - target: cortex-m0
+            packages: gcc-arm-none-eabi libnewlib-arm-none-eabi
+            cc: arm-none-eabi-gcc
+            size: arm-none-eabi-size
+            nm: arm-none-eabi-nm
+            flags: -mcpu=cortex-m0 -mthumb
+            link: --specs=nano.specs --specs=nosys.specs
+          - target: avr-atmega328p
+            packages: gcc-avr avr-libc
+            cc: avr-gcc
+            size: avr-size
+            nm: avr-nm
+            flags: -mmcu=atmega328p
+            link: ""
+    env:
+      WARNINGS: >-
+        -Wall -Wextra -Wpedantic -Wconversion -Wdouble-promotion -Wshadow -Wfloat-equal
+        -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wundef -Werror
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+      - name: Link a firmware image with strict warnings
+        run: |
+          for variant in full minimal; do
+            define=""; [ "$variant" = minimal ] && define=-DFOOTPRINT_MINIMAL
+            ${{ matrix.cc }} ${{ matrix.flags }} $define -Os -std=c99 -Iinclude $WARNINGS \
+              -ffunction-sections -fdata-sections -Wl,--gc-sections ${{ matrix.link }} \
+              tools/footprint.c src/*.c -lm -o "footprint-$variant.elf"
+          done
+      - name: Code size
+        run: |
+          {
+            echo "### Code size: ${{ matrix.target }} (-Os, --gc-sections)"
+            echo
+            echo "Whole image. \`full\` uses every module and computes coefficients at run time;"
+            echo "\`minimal\` uses coefficients computed offline (no double-precision math)."
+            echo '```'
+            ${{ matrix.size }} footprint-full.elf footprint-minimal.elf
+            echo
+            ${{ matrix.nm }} -S --size-sort -t d footprint-full.elf | grep ' tc_' | awk '{printf "%-24s %6d B\n", $4, $2}'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: pip install clang-format==20.1.8
+      - name: Check formatting
+        run: clang-format --dry-run --Werror include/tinyctrl/*.h src/*.c src/*.h tests/*.c tests/*.h examples/*.c tools/*.c
+      - name: Check that the version numbers agree
+        run: |
+          cmake=$(sed -n 's/^ *VERSION \([0-9.]*\)$/\1/p' CMakeLists.txt)
+          header=$(sed -n 's/^#define TINYCTRL_VERSION *"\(.*\)"$/\1/p' include/tinyctrl/tinyctrl.h)
+          parts=$(awk '/TINYCTRL_VERSION_(MAJOR|MINOR|PATCH)/ {printf "%s%s", sep, $3; sep="."}' include/tinyctrl/tinyctrl.h)
+          json=$(sed -n 's/^ *"version": "\(.*\)",$/\1/p' library.json)
+          echo "CMakeLists.txt: $cmake, tinyctrl.h: $header ($parts), library.json: $json"
+          [ -n "$cmake" ] && [ "$cmake" = "$header" ] && [ "$cmake" = "$parts" ] && [ "$cmake" = "$json" ]
+          grep -q "^## \[$cmake\]" CHANGELOG.md

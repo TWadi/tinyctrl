@@ -1,0 +1,21 @@
+{
+  "name": "tinyctrl",
+  "version": "0.1.0",
+  "description": "Tested control toolbox for microcontrollers in C99: PID with anti-windup, Tustin discretisation, biquad filters, lead/lag compensators. No dynamic memory.",
+  "keywords": ["pid", "control", "controller", "filter", "biquad", "iir", "tustin", "embedded", "c99"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TWadi/tinyctrl.git"
+  },
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "headers": "tinyctrl/tinyctrl.h",
+  "build": {
+    "includeDir": "include",
+    "srcDir": "src"
+  },
+  "export": {
+    "include": ["include", "src", "LICENSE", "README.md", "library.json"]
+  }
+}

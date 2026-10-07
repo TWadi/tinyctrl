@@ -1,0 +1,8 @@
+build*/
+cmake-build-*/
+*.o
+*.elf
+*.csv
+__pycache__/
+.vscode/
+.idea/
